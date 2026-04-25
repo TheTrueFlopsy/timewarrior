@@ -30,12 +30,23 @@ import os
 import sys
 import unittest
 from datetime import datetime, timedelta
+from unicodedata import east_asian_width
 
 # Ensure python finds the local simpletap module
 sys.path.append(os.path.dirname(os.path.abspath(__file__)))
 
 from basetest import Timew, TestCase
 
+def count_wide_chars(s):
+    return sum((east_asian_width(c) == 'W' for c in s))
+
+# CAUTION: This WON'T be correct when combining diacritics are involved,
+# nor in many other cases.
+# NOTE: It could be made to give the correct answer more often by inspecting
+# each character with category() and/or combining() (to filter out zero-width
+# code points).
+def hacked_unicode_width(s):
+    return len(s) + count_wide_chars(s)
 
 class TestChart(TestCase):
     def setUp(self):
@@ -195,9 +206,82 @@ class TestChart(TestCase):
 
 """, out)
 
+    def test_chart_wide_char_tags_nocolor(self):
+        # Identify the positions ((X,Y), zero-based, relative to the start (i.e. UL corner) of the output)
+        # of the hours axis and the tracked interval grid.
+        # ISSUE: How to robustly determine expected values for these coordinates?
+        axis_pos = (11, 1)
+        grid_pos = (11, 2)
+
+        # Determine the expected dimensions (width, height) of the tracked interval grid
+        # and the surrounding output (e.g. date labels and daily totals).
+        # ISSUE: How to robustly determine expected values for these parameters?
+        n_days = 7              # all seven days of the week displayed
+        lines_per_day = 1       # reports.week.lines=1
+        n_hours = 24            # all 24 hours of the day displayed
+        minutes_per_char = 15   # reports.week.cell=15
+        hour_spacing = 1        # reports.week.spacing=1
+        output_extra_width = 7  # width of the totals column ("  HH:MM")
+
+        hour_width = max(1, 60//minutes_per_char + hour_spacing)
+        day_width = n_hours * hour_width
+        grid_dims = (day_width, n_days * lines_per_day)
+        output_dims = (grid_pos[0] + grid_dims[0] + output_extra_width, grid_dims[1])
+
+        # Track some itervals to have something to work with. Use tag names that include wide characters.
+        # NOTE: The Timew class uses the standard 'shlex' module for shell-compatible splitting of the
+        # argument string (e.g. parsing 'herpa derpa ding dong' as a single argument).
+        self.t("track 2026-02-16T04:00:00 - 2026-02-16T07:30:00 😍tag_test😍")
+        self.t("track 2026-02-16T08:00:00 - 2026-02-16T11:00:00 测试测试")
+        self.t("track 2026-02-16T11:00:00 - 2026-02-16T15:30:00 SãoSebastião")
+        self.t("track 2026-02-16T15:30:00 - 2026-02-16T17:00:00 'herpa derpa ding dong'")
+
+        # NOTE: Track some time each day of the week to ensure that all lines of the interval grid
+        # are full-width (with a daily total in the totals column).
+        self.t("track 2026-02-17T00:00:00 - 2026-02-17T03:00:00 'herpa derpa ding dong'")
+        self.t("track 2026-02-18T03:00:00 - 2026-02-18T06:00:00 'herpa derpa ding dong'")
+        self.t("track 2026-02-19T06:00:00 - 2026-02-19T09:00:00 'herpa derpa ding dong'")
+        self.t("track 2026-02-20T09:00:00 - 2026-02-20T12:00:00 'herpa derpa ding dong'")
+        self.t("track 2026-02-21T12:00:00 - 2026-02-21T15:00:00 'herpa derpa ding dong'")
+        self.t("track 2026-02-22T15:00:00 - 2026-02-22T18:00:00 'herpa derpa ding dong'")
+
+        # Get a "week" report.
+        code, out, err = self.t("week 2026-02-16 - 2026-02-23 :nocolor")
+
+        # Check the output to determine whether the graph width is equal to the specified width.
+        # Look for the right edge of the interval grid in each output line that contains a part of the grid.
+        hour_0_col = axis_pos[0]
+        hour_23_col = axis_pos[0] + grid_dims[0] - hour_width
+
+        out_lines = out.splitlines()
+        self.assertTrue(len(out_lines) >= grid_pos[1] + grid_dims[1])
+
+        lineno = 0
+        for line in out_lines:
+            if lineno == axis_pos[1]:
+                self.assertEqual(len(line), output_dims[0])
+                self.assertEqual(line[hour_0_col:(hour_0_col+2)], '0 ')
+                self.assertEqual(line[hour_23_col:(hour_23_col+2)], '23')
+
+            if lineno == grid_pos[1]:  # first line of interval grid (contains wide characters)
+                # Check whether the total /Unicode display width/ of the line equals the specified width.
+                self.assertEqual(hacked_unicode_width(line), output_dims[0])
+
+                # Check whether the /length in code points/ of the line equals the specified width minus
+                # the total extra Unicode display width (i.e. the number of wide (two-column) characters).
+                self.assertEqual(len(line), output_dims[0] - count_wide_chars(line))
+
+                self.assertEqual(line[-3], ':')  # the colon in the daily total
+            elif grid_pos[1] < lineno < grid_pos[1] + grid_dims[1]:  # other line (no wide characters)
+                self.assertEqual(len(line), output_dims[0])
+                self.assertEqual(line[-3], ':')  # the colon in the daily total
+
+            lineno += 1
+
+    def test_chart_wide_char_tags_color(self):
+        pass  # TODO: Implement this.
 
 if __name__ == "__main__":
     from simpletap import TAPTestRunner
 
     unittest.main(testRunner=TAPTestRunner())
-
