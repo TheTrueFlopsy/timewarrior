@@ -36,15 +36,16 @@ from unicodedata import east_asian_width
 sys.path.append(os.path.dirname(os.path.abspath(__file__)))
 
 from basetest import Timew, TestCase
+from basetest.exceptions import CommandError
 
-_ESCAPE_START_CHAR = '\0x1b'  # ASCII Escape
-_ESCAPE_START_CHAR_2 = '['
-_ESCAPE_ARG_CHARS = '0123456789;'
-_ESCAPE_END_CHAR = 'm'  # end of ANSI "Select Graphic Rendition" escape sequence
-_ESCAPE_ARGS_EOR = '0'  # attribute reset, indicating end of attributed range
+_ESCAPE_START_CHAR = "\x1b"  # ASCII Escape
+_ESCAPE_START_CHAR_2 = "["
+_ESCAPE_ARG_CHARS = "0123456789;"
+_ESCAPE_END_CHAR = "m"  # end of ANSI "Select Graphic Rendition" escape sequence
+_ESCAPE_ARGS_EOR = "0"  # attribute reset, indicating end of attributed range
 
 def count_wide_chars(s):
-    return sum((east_asian_width(c) == 'W' for c in s))
+    return sum((east_asian_width(c) == "W" for c in s))
 
 # CAUTION: This WON'T be correct when combining diacritics are involved,
 # nor in many other cases.
@@ -85,16 +86,24 @@ def get_display_bounds(start_h, start_m, end_h, end_m, minutes_per_col, hour_spa
 def find_ansi_ranges(s):
     ranges = []
     in_escape = False
+    escape_args = None
     in_range = False
     range_start_col = None
-    escape_args = None
     col_i = 0
 
     for c in s:
-        if c == _ESCAPE_START_CHAR:  # start of escape sequence
-            in_escape = True
-        elif in_escape:  # inside escape sequence
-            if c == _ESCAPE_END_CHAR:  # end of escape sequence
+        if in_escape:  # inside escape sequence
+            if c == _ESCAPE_START_CHAR_2:
+                if escape_args is not None:  # should follow _ESCAPE_START_CHAR
+                    return None  # fail
+
+                escape_args = ""  # start of escape sequence argument list
+            elif c in _ESCAPE_ARG_CHARS:
+                if escape_args is None:  # should follow _ESCAPE_START_CHAR_2
+                    return None  # fail
+
+                escape_args += c
+            elif c == _ESCAPE_END_CHAR:  # end of escape sequence
                 if escape_args is None or len(escape_args) == 0:  # should follow escape args
                     return None  # fail
 
@@ -102,8 +111,9 @@ def find_ansi_ranges(s):
                     if escape_args != _ESCAPE_ARGS_EOR:  # expecting end of range
                         return None  # fail
 
-                    in_range = False
                     ranges += ( range_start_col, col_i ),
+                    in_range = False
+                    range_start_col = None
                 else:  # not inside ANSI attribute range
                     if escape_args == _ESCAPE_ARGS_EOR:  # expecting start of range
                         return None  # fail
@@ -113,25 +123,17 @@ def find_ansi_ranges(s):
 
                 in_escape = False
                 escape_args = None
-            elif c == _ESCAPE_START_CHAR_2:
-                if escape_args is not None:  # should follow _ESCAPE_START_CHAR
-                    return None  # fail
-
-                escape_args = ''  # start of escape sequence argument list
-            elif c in _ESCAPE_ARG_CHARS:
-                if escape_args is None:  # should follow _ESCAPE_START_CHAR_2
-                    return None  # fail
-
-                escape_args += c
             else:  # unexpected character in escape sequence
                 return None  # fail
+        elif c == _ESCAPE_START_CHAR:  # start of escape sequence
+            in_escape = True
         else:  # not inside escape sequence
             col_i += hacked_unicode_width(c)  # Only count columns outside escape sequences.
 
     return ranges
 
 def strip_ansi_escapes(s):
-    head = ''
+    head = ""
     tail = s
 
     while True:
@@ -362,8 +364,8 @@ class TestChart(TestCase):
         for line in out_lines:
             if lineno == axis_pos[1]:
                 self.assertEqual(len(line), output_dims[0])
-                self.assertEqual(line[hour_0_col:(hour_0_col+2)], '0 ')
-                self.assertEqual(line[hour_23_col:(hour_23_col+2)], '23')
+                self.assertEqual(line[hour_0_col:(hour_0_col+2)], "0 ")
+                self.assertEqual(line[hour_23_col:(hour_23_col+2)], "23")
 
             if lineno == grid_pos[1]:  # first line of interval grid (contains wide characters)
                 # Check whether the total /Unicode display width/ of the line equals the specified width.
@@ -373,10 +375,10 @@ class TestChart(TestCase):
                 # the total extra Unicode display width (i.e. the number of wide (two-column) characters).
                 self.assertEqual(len(line), output_dims[0] - count_wide_chars(line))
 
-                self.assertEqual(line[-3], ':')  # the colon in the daily total
+                self.assertEqual(line[-3], ":")  # the colon in the daily total
             elif grid_pos[1] < lineno < grid_pos[1] + grid_dims[1]:  # other line (no wide characters)
                 self.assertEqual(len(line), output_dims[0])
-                self.assertEqual(line[-3], ':')  # the colon in the daily total
+                self.assertEqual(line[-3], ":")  # the colon in the daily total
 
             lineno += 1
 
@@ -399,10 +401,20 @@ class TestChart(TestCase):
 
         # Configure our instance of Timewarrior.
         # TODO: Set more Boolean config variables.
-        self.t.config('reports.week.hours', 'no')  # display all hours of the day
-        self.t.config('reports.week.lines', str(lines_per_day))
-        self.t.config('reports.week.cell', str(minutes_per_col))
-        self.t.config('reports.week.spacing', str(hour_spacing))
+        config_settings = [
+            ( "reports.week.hours", "no" ),
+            ( "reports.week.lines", lines_per_day ),
+            ( "reports.week.cell", minutes_per_col ),
+            ( "reports.week.spacing", hour_spacing ) ]
+
+        for var, value in config_settings:
+            try:
+                self.t.config(var, str(value))
+            except CommandError as e:
+                # NOTE: Suppress CommandErrors due to timew returning non-zero exit status
+                # due to an attempt to set a config parameter to its current value. I'm not
+                # sure that treating a no-op as an error is a good idea at any layer, TBH.
+                pass
 
         hour_width = max(1, 60//minutes_per_col + hour_spacing)
         day_width = n_hours * hour_width
@@ -415,7 +427,7 @@ class TestChart(TestCase):
             ( 4, 0, 7, 30 ),
             ( 8, 0, 11, 0 ),
             ( 11, 0, 15, 30 ),
-            ( 15, 30, 17, 0 )]
+            ( 15, 30, 17, 0 ) ]
 
         # [ (start_col, end_col), ... ] # width_in_cols = end_col - start_col
         expected_display_bounds = []  # bounds relative to start of grid row (00:00:00)
@@ -440,7 +452,7 @@ class TestChart(TestCase):
         self.t("track 2026-02-21T12:00:00 - 2026-02-21T15:00:00 'herpa derpa ding dong'")
         self.t("track 2026-02-22T15:00:00 - 2026-02-22T18:00:00 'herpa derpa ding dong'")
 
-        # Get "week" reports with and without color.
+        # Get "week" reports without and with color.
         nc_code, nc_out, nc_err = self.t("week 2026-02-16 - 2026-02-23 :nocolor")
         c_code, c_out, c_err = self.t("week 2026-02-16 - 2026-02-23 :color")
 
@@ -458,22 +470,28 @@ class TestChart(TestCase):
         for nc_line, c_line in zip(nc_out_lines, c_out_lines, strict=True):
             # For each c_line, identify the start and end of each displayed interval block
             # by searching for the corresponding ANSI escape sequences. Each interval start should
-            # be associated with a "set attributes" sequence (f'\x1b[{attr_args}m'), each interval
-            # end with a "reset attributes" sequence ('\x1b[0m'). Verify that this succeeds.
-            actual_display_bounds = find_ansi_ranges(c_line)
+            # be associated with a "set attributes" sequence (f"\x1b[{attr_args}m"), each interval
+            # end with a "reset attributes" sequence ("\x1b[0m"). Verify that this succeeds.
+            actual_display_bounds = find_ansi_ranges(c_line_grid)
             self.assertIsNotNone(actual_display_bounds)
+            actual_display_bounds = [
+                ( start - grid_pos[0], end - grid_pos[0] ) for start, end in actual_display_bounds ]
 
-            # Strip all ANSI escape sequences from each c_line. Verify that this succeeds.
+            # Strip all ANSI escape sequences from each c_line and nc_line. Verify that this succeeds.
             c_line_stripped = strip_ansi_escapes(c_line)
             self.assertIsNotNone(c_line_stripped)
+            # NOTE: The :nocolor line must be stripped too, because some escape sequences may be
+            # present there too (e.g. because the underline attribute is used for line drawing).
+            nc_line_stripped = strip_ansi_escapes(nc_line)
+            self.assertIsNotNone(nc_line_stripped)
 
-            # Check whether the stripped c_line equals nc_line.
-            self.assertEqual(len(c_line_stripped), len(nc_line))
+            # Check whether the stripped output lines are equal.
+            self.assertEqual(c_line_stripped, nc_line_stripped)
 
             if lineno == axis_pos[1]:
                 self.assertEqual(len(nc_line), output_dims[0])
-                self.assertEqual(nc_line[hour_0_col:(hour_0_col+2)], '0 ')
-                self.assertEqual(nc_line[hour_23_col:(hour_23_col+2)], '23')
+                self.assertEqual(nc_line[hour_0_col:(hour_0_col+2)], "0 ")
+                self.assertEqual(nc_line[hour_23_col:(hour_23_col+2)], "23")
 
             if lineno == grid_pos[1]:  # first line of interval grid (contains wide characters)
                 # Check whether the total /Unicode display width/ of the line equals the specified width.
@@ -487,10 +505,10 @@ class TestChart(TestCase):
                 # ones in expected_display_bounds.
                 self.assertEqual(actual_display_bounds, expected_display_bounds)
 
-                self.assertEqual(nc_line[-3], ':')  # the colon in the daily total
+                self.assertEqual(nc_line[-3], ":")  # the colon in the daily total
             elif grid_pos[1] < lineno < grid_pos[1] + grid_dims[1]:  # other line (no wide characters)
                 self.assertEqual(len(nc_line), output_dims[0])
-                self.assertEqual(nc_line[-3], ':')  # the colon in the daily total
+                self.assertEqual(nc_line[-3], ":")  # the colon in the daily total
 
             lineno += 1
 
