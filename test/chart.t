@@ -153,6 +153,33 @@ def _strip_ansi_escapes(s):
 
     return head
 
+class _TrackedInterval:
+    @classmethod
+    def _make_datetime_str(cls, dom, h, m):
+        return f"2026-02-{dom:02d}T{h:02d}:{m:02d}:00"
+
+    def __init__(self, dom, start_h, start_m, end_h, end_m, tags):
+        self.dom = dom
+        self.start_h = start_h
+        self.start_m = start_m
+        self.end_h = end_h
+        self.end_m = end_m
+        self.tags = tags
+
+    def __str__(self):
+        start_dt = self._make_datetime_str(self.dom, self.start_h, self.start_m)
+        end_dt = self._make_datetime_str(self.dom, self.end_h, self.end_m)
+        tags = self.tags
+
+        if not isinstance(tags, str):
+            tags = " ".join(tags)
+
+        return f"track {start_dt} - {end_dt} {tags}"
+
+    def get_display_bounds(self, minutes_per_col, hour_spacing):
+        return _get_display_bounds(
+            self.start_h, self.start_m, self.end_h, self.end_m, minutes_per_col, hour_spacing)
+
 
 class TestChart(TestCase):
     def setUp(self):
@@ -312,6 +339,161 @@ class TestChart(TestCase):
 
 """, out)
 
+    # CAUTION: The "intervals" argument is deeply edited by _do_wide_char_tags_test().
+    # Avoid using any part of the argument for anything else after calling this method.
+    def _do_wide_char_tags_test(self, config, intervals):
+        self.assertTrue(len(intervals) <= 7)  # No more than one week is supported.
+
+        # Identify the positions ((X,Y), zero-based, relative to the start (i.e. UL corner)
+        # of the output) of the hours axis and the tracked interval grid.
+        # ISSUE: How to robustly determine expected values for these coordinates?
+        axis_pos = (11, 1)
+        grid_pos = (11, 2)
+
+        # Determine the expected dimensions (width, height) of the tracked interval grid
+        # and the surrounding output (e.g. date labels and daily totals).
+        # TODO: Support additional config variables.
+        n_days = 7              # all seven days of the week displayed
+        lines_per_day = config.get("reports.week.lines", 1)
+        n_hours = 24            # all 24 hours of the day displayed
+        minutes_per_col = config.get("reports.week.cell", 15)
+        hour_spacing = config.get("reports.week.spacing", 1)
+        output_extra_width = 7  # width of the totals column ("  HH:MM")
+
+        # Configure our instance of Timewarrior.
+        for var, value in config.items():
+            try:
+                self.t.config(var, str(value))
+            except CommandError as e:
+                # NOTE: Suppress CommandErrors due to timew returning non-zero exit status
+                # due to an attempt to set a config parameter to its current value. I'm not
+                # sure that treating a no-op as an error is a good idea at any layer, TBH.
+                pass
+
+        hour_width = max(1, 60//minutes_per_col + hour_spacing)
+        day_width = n_hours * hour_width
+        grid_dims = (day_width, n_days * lines_per_day)
+        output_dims = (grid_pos[0] + grid_dims[0] + output_extra_width, grid_dims[1])
+        start_day_of_month = 16  # 2026-02-16 was a Monday
+        end_day_of_month = start_day_of_month + 7
+
+        # NOTE: Track some time each day of the week to ensure that all lines of the interval grid
+        # are full-width (with a daily total in the totals column).
+        start_h = 0
+        start_h_delta = 3
+        default_tags = "'herpa derpa ding dong'"
+        while len(intervals) < 7:  # Some days of the week still lack tracked intervals.
+            interval = _TrackedInterval(0, start_h, 0, start_h + start_h_delta, 0, default_tags)
+            intervals.append([ interval ])
+            start_h += start_h_delta
+
+        # Map start and end times of test intervals to start and end columns of
+        # corresponding displayed interval blocks.
+        # [ (start_col, end_col), ... ] # width_in_cols = end_col - start_col
+        expected_display_bounds = []  # bounds relative to start of grid row (00:00:00)
+        curr_day_of_month = start_day_of_month
+        for intervals_for_the_day in intervals:
+            expected_display_bounds_for_the_day = []
+
+            for interval in intervals_for_the_day:
+                # NOTE: Enforce the expected days of the month in test input.
+                interval.dom = curr_day_of_month
+
+                expected_display_bounds_for_the_day.append(
+                    interval.get_display_bounds(minutes_per_col, hour_spacing))
+
+            expected_display_bounds.append(expected_display_bounds_for_the_day)
+            curr_day_of_month += 1
+
+        # Execute a "track" command for each interval in the (modified)
+        for intervals_for_the_day in intervals:
+            for interval in intervals_for_the_day:
+                self.t(str(interval))
+
+        # Get "week" reports without and with color.
+        nc_code, nc_out, nc_err = self.t(
+            f"week 2026-02-{start_day_of_month:02d} - 2026-02-{end_day_of_month:02d} :nocolor")
+        c_code, c_out, c_err = self.t(
+            f"week 2026-02-{start_day_of_month:02d} - 2026-02-{end_day_of_month:02d} :color")
+
+        # Check the output to determine whether the graph width is equal to the specified width.
+        # Look for the right edge of the interval grid in each output line that contains a part of the grid.
+        hour_0_col = axis_pos[0]
+        hour_23_col = axis_pos[0] + grid_dims[0] - hour_width
+
+        nc_out_lines = nc_out.splitlines()
+        c_out_lines = c_out.splitlines()
+        self.assertEqual(len(nc_out_lines), len(c_out_lines))
+        self.assertTrue(len(nc_out_lines) >= grid_pos[1] + grid_dims[1])
+
+        lineno = 0
+        day_of_week = 0
+        for nc_line, c_line in zip(nc_out_lines, c_out_lines, strict=True):
+            # For each c_line, identify the start and end of each displayed interval block
+            # by searching for the corresponding ANSI escape sequences. Each interval start should
+            # be associated with a "set attributes" sequence (f"\x1b[{attr_args}m"), each interval
+            # end with a "reset attributes" sequence ("\x1b[0m"). Verify that this succeeds.
+            actual_display_bounds = _find_ansi_ranges(c_line_grid)
+            self.assertIsNotNone(actual_display_bounds)
+            actual_display_bounds = [  # Shift display bounds by starting column of interval grid.
+                ( start - grid_pos[0], end - grid_pos[0] ) for start, end in actual_display_bounds ]
+
+            # Strip all ANSI escape sequences from each c_line and nc_line. Verify that this succeeds.
+            c_line_stripped = _strip_ansi_escapes(c_line)
+            self.assertIsNotNone(c_line_stripped)
+            # NOTE: The :nocolor line must be stripped too, because some escape sequences may be
+            # present there too (e.g. because the underline attribute is used for line drawing).
+            nc_line_stripped = _strip_ansi_escapes(nc_line)
+            self.assertIsNotNone(nc_line_stripped)
+
+            # Check whether the stripped output lines are equal.
+            self.assertEqual(c_line_stripped, nc_line_stripped)
+
+            if lineno == axis_pos[1]:  # time axis output line
+                self.assertEqual(len(nc_line), output_dims[0])
+                self.assertEqual(nc_line[hour_0_col:(hour_0_col+2)], "0 ")
+                self.assertEqual(nc_line[hour_23_col:(hour_23_col+2)], "23")
+
+            grid_lineno = lineno - grid_pos[1]
+            if 0 < grid_lineno < grid_dims[1]:  # output line within interval grid
+                expected_display_bounds_for_the_day = expected_display_bounds[day_of_week]
+
+                # Check whether the total Unicode display width of the line equals the specified width.
+                self.assertEqual(_hacked_unicode_width(nc_line), output_dims[0])
+
+                # Check whether the actual interval boundaries in the output match the expected
+                # ones for the current day of the week.
+                self.assertEqual(actual_display_bounds, expected_display_bounds_for_the_day)
+
+                self.assertEqual(nc_line[-3], ":")  # the colon in the daily total
+
+                # Keep track of which day of the week we're at.
+                if (grid_lineno + 1) % lines_per_day == 0:
+                    day_of_week += 1
+
+            lineno += 1
+
+    def test_chart_example(self):
+        config = {
+            "reports.week.hours": "no",
+            "reports.week.lines": 1,
+            "reports.week.cell": 15,
+            "reports.week.spacing": 1 }
+
+        # Track some itervals to have something to work with. Use tag names that include wide characters.
+        # NOTE: The Timew class uses the standard 'shlex' module for shell-compatible splitting of the
+        # argument string (e.g. parsing 'herpa derpa ding dong' as a single argument).
+
+        # _TrackedInterval(day_of_month, start_h, start_m, end_h, end_m, tags)
+        intervals = [  # [ [ mondays_intervals ], [ tuesdays_intervals ], ... ]
+            [
+                _TrackedInterval(16,  4,  0,  7, 30, "😍tag_test😍"),
+                _TrackedInterval(16,  8,  0, 11,  0, "测试测试"),
+                _TrackedInterval(16, 11,  0, 15, 30, "SãoSebastião"),
+                _TrackedInterval(16, 15, 30, 17,  0, "'herpa derpa ding dong'") ] ]
+
+        self._do_wide_char_tags_test(config, intervals)
+
     def test_chart_wide_char_tags(self):
         # Identify the positions ((X,Y), zero-based, relative to the start (i.e. UL corner)
         # of the output) of the hours axis and the tracked interval grid.
@@ -353,7 +535,7 @@ class TestChart(TestCase):
 
         # Map start and end times of test intervals to start and end columns of
         # corresponding displayed interval blocks.
-        interval_bounds = [  # [ ( start_h, start_m, end_h, end_m), ... ]
+        interval_bounds = [  # [ ( start_h, start_m, end_h, end_m ), ... ]
             ( 4, 0, 7, 30 ),
             ( 8, 0, 11, 0 ),
             ( 11, 0, 15, 30 ),
