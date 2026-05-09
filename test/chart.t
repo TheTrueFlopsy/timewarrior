@@ -45,9 +45,6 @@ _ESCAPE_ARG_CHARS = "0123456789;"
 _ESCAPE_END_CHAR = "m"  # end of ANSI "Select Graphic Rendition" escape sequence
 _ESCAPE_ARGS_EOR = "0"  # attribute reset, indicating end of attributed range
 
-#def _count_wide_chars(s):
-#    return sum((east_asian_width(c) == "W" for c in s))
-
 def _hacked_unicode_char_width(c):
     if unicode_general_category(c) in ( 'Mn', 'Me', 'Cc', 'Cf', 'Cs', 'Co', 'Cn' ):
         return 0
@@ -475,19 +472,21 @@ class TestChart(TestCase):
             grid_lineno = lineno - grid_pos[1]
             if 0 <= grid_lineno < grid_dims[1]:  # output line within interval grid
                 expected_display_bounds_for_the_day = expected_display_bounds[day_of_week]
+                expected_unicode_width = output_dims[0]
+
+                # Keep track of which day of the week we're at, and which grid line for that day.
+                if (grid_lineno + 1) % lines_per_day == 0:  # New day starts on next line.
+                    self.assertEqual(c_line_stripped[-3], ":")  # the colon in the daily total
+                    day_of_week += 1
+                else:  # This is NOT the last line for this day, so there's no totals column.
+                    expected_unicode_width -= output_extra_width
 
                 # Check whether the total Unicode display width of the line equals the specified width.
-                self.assertEqual(_hacked_unicode_width(nc_line), output_dims[0])
+                self.assertEqual(_hacked_unicode_width(nc_line), expected_unicode_width)
 
                 # Check whether the actual interval boundaries in the output match the expected
                 # ones for the current day of the week.
                 self.assertEqual(actual_display_bounds, expected_display_bounds_for_the_day)
-
-                self.assertEqual(nc_line[-3], ":")  # the colon in the daily total
-
-                # Keep track of which day of the week we're at.
-                if (grid_lineno + 1) % lines_per_day == 0:
-                    day_of_week += 1
 
             lineno += 1
 
@@ -567,15 +566,26 @@ class TestChart(TestCase):
         hints = ( "ids", )
         self._do_wide_char_tags_test(config, intervals, hints)
 
-    def test_chart_wide_chars_high_internal(self):
+    def test_chart_wide_chars_high(self):
         config = {
             "reports.week.hours": "no",
             "reports.week.lines": 3,
-            "reports.week.cell": 10,
-            "reports.week.spacing": 1,
-            "reports.week.axis": "internal" }
+            "reports.week.cell": 15,
+            "reports.week.spacing": 1 }
         intervals = self._make_unicode_dataset_basic()
-        self._do_wide_char_tags_test(config, intervals, hints)
+        self._do_wide_char_tags_test(config, intervals)
+
+    # TODO: This is broken because extra ANSI formatting codes are generated for
+    # the internal hour labels, and the test driver cannot deal with that.
+    # def test_chart_wide_chars_high_internal(self):
+        # config = {
+            # "reports.week.hours": "no",
+            # "reports.week.lines": 3,
+            # "reports.week.cell": 15,
+            # "reports.week.spacing": 1,
+            # "reports.week.axis": "internal" }
+        # intervals = self._make_unicode_dataset_basic()
+        # self._do_wide_char_tags_test(config, intervals)
 
     # ISSUE: Unusual minutes-per-char values (like 11) appear to break the chart.
     @unittest.expectedFailure
@@ -599,136 +609,6 @@ class TestChart(TestCase):
             "reports.week.spacing": 1 }
         intervals = self._make_unicode_dataset_hard()
         self._do_wide_char_tags_test(config, intervals)
-
-    def test_chart_wide_char_tags(self):
-        # Identify the positions ((X,Y), zero-based, relative to the start (i.e. UL corner)
-        # of the output) of the hours axis and the tracked interval grid.
-        # ISSUE: How to robustly determine expected values for these coordinates?
-        axis_pos = (11, 1)
-        grid_pos = (11, 2)
-
-        # Determine the expected dimensions (width, height) of the tracked interval grid
-        # and the surrounding output (e.g. date labels and daily totals).
-        # ISSUE: How to robustly determine expected values for these parameters?
-        n_days = 7              # all seven days of the week displayed
-        lines_per_day = 1       # reports.week.lines=1
-        n_hours = 24            # all 24 hours of the day displayed
-        minutes_per_col = 15    # reports.week.cell=15
-        hour_spacing = 1        # reports.week.spacing=1
-        output_extra_width = 7  # width of the totals column ("  HH:MM")
-
-        # Configure our instance of Timewarrior.
-        # TODO: Set more Boolean config variables.
-        config_settings = [
-            ( "reports.week.hours", "no" ),
-            ( "reports.week.lines", lines_per_day ),
-            ( "reports.week.cell", minutes_per_col ),
-            ( "reports.week.spacing", hour_spacing ) ]
-
-        for var, value in config_settings:
-            try:
-                self.t.config(var, str(value))
-            except CommandError as e:
-                # NOTE: Suppress CommandErrors due to timew returning non-zero exit status
-                # due to an attempt to set a config parameter to its current value. I'm not
-                # sure that treating a no-op as an error is a good idea at any layer, TBH.
-                pass
-
-        hour_width = max(1, 60//minutes_per_col + hour_spacing)
-        day_width = n_hours * hour_width
-        grid_dims = (day_width, n_days * lines_per_day)
-        output_dims = (grid_pos[0] + grid_dims[0] + output_extra_width, grid_dims[1])
-
-        # Map start and end times of test intervals to start and end columns of
-        # corresponding displayed interval blocks.
-        interval_bounds = [  # [ ( start_h, start_m, end_h, end_m ), ... ]
-            ( 4, 0, 7, 30 ),
-            ( 8, 0, 11, 0 ),
-            ( 11, 0, 15, 30 ),
-            ( 15, 30, 17, 0 ) ]
-
-        # [ (start_col, end_col), ... ] # width_in_cols = end_col - start_col
-        expected_display_bounds = []  # bounds relative to start of grid row (00:00:00)
-        for start_h, start_m, end_h, end_m in interval_bounds:
-            expected_display_bounds.append(_get_display_bounds(
-                start_h, start_m, end_h, end_m, minutes_per_col, hour_spacing))
-
-        # Track some itervals to have something to work with. Use tag names that include wide characters.
-        # NOTE: The Timew class uses the standard 'shlex' module for shell-compatible splitting of the
-        # argument string (e.g. parsing 'herpa derpa ding dong' as a single argument).
-        self.t("track 2026-02-16T04:00:00 - 2026-02-16T07:30:00 😍tag_test😍")
-        self.t("track 2026-02-16T08:00:00 - 2026-02-16T11:00:00 测试测试")
-        self.t("track 2026-02-16T11:00:00 - 2026-02-16T15:30:00 SãoSebastião")
-        self.t("track 2026-02-16T15:30:00 - 2026-02-16T17:00:00 'herpa derpa ding dong'")
-
-        # NOTE: Track some time each day of the week to ensure that all lines of the interval grid
-        # are full-width (with a daily total in the totals column).
-        self.t("track 2026-02-17T00:00:00 - 2026-02-17T03:00:00 'herpa derpa ding dong'")
-        self.t("track 2026-02-18T03:00:00 - 2026-02-18T06:00:00 'herpa derpa ding dong'")
-        self.t("track 2026-02-19T06:00:00 - 2026-02-19T09:00:00 'herpa derpa ding dong'")
-        self.t("track 2026-02-20T09:00:00 - 2026-02-20T12:00:00 'herpa derpa ding dong'")
-        self.t("track 2026-02-21T12:00:00 - 2026-02-21T15:00:00 'herpa derpa ding dong'")
-        self.t("track 2026-02-22T15:00:00 - 2026-02-22T18:00:00 'herpa derpa ding dong'")
-
-        # Get "week" reports without and with color.
-        nc_code, nc_out, nc_err = self.t("week 2026-02-16 - 2026-02-23 :nocolor")
-        c_code, c_out, c_err = self.t("week 2026-02-16 - 2026-02-23 :color")
-
-        # Check the output to determine whether the graph width is equal to the specified width.
-        # Look for the right edge of the interval grid in each output line that contains a part of the grid.
-        hour_0_col = axis_pos[0]
-        hour_23_col = axis_pos[0] + grid_dims[0] - hour_width
-
-        nc_out_lines = nc_out.splitlines()
-        c_out_lines = c_out.splitlines()
-        self.assertEqual(len(nc_out_lines), len(c_out_lines))
-        self.assertTrue(len(nc_out_lines) >= grid_pos[1] + grid_dims[1])
-
-        lineno = 0
-        for nc_line, c_line in zip(nc_out_lines, c_out_lines, strict=True):
-            # For each c_line, identify the start and end of each displayed interval block
-            # by searching for the corresponding ANSI escape sequences. Each interval start should
-            # be associated with a "set attributes" sequence (f"\x1b[{attr_args}m"), each interval
-            # end with a "reset attributes" sequence ("\x1b[0m"). Verify that this succeeds.
-            actual_display_bounds = _find_ansi_ranges(c_line)
-            self.assertIsNotNone(actual_display_bounds)
-            actual_display_bounds = [
-                ( start - grid_pos[0], end - grid_pos[0] ) for start, end in actual_display_bounds ]
-
-            # Strip all ANSI escape sequences from each c_line and nc_line. Verify that this succeeds.
-            c_line_stripped = _strip_ansi_escapes(c_line)
-            self.assertIsNotNone(c_line_stripped)
-            # NOTE: The :nocolor line must be stripped too, because some escape sequences may be
-            # present there too (e.g. because the underline attribute is used for line drawing).
-            nc_line_stripped = _strip_ansi_escapes(nc_line)
-            self.assertIsNotNone(nc_line_stripped)
-
-            # Check whether the stripped output lines are equal.
-            self.assertEqual(c_line_stripped, nc_line_stripped)
-
-            if lineno == axis_pos[1]:
-                self.assertEqual(len(nc_line), output_dims[0])
-                self.assertEqual(nc_line[hour_0_col:(hour_0_col+2)], "0 ")
-                self.assertEqual(nc_line[hour_23_col:(hour_23_col+2)], "23")
-
-            if lineno == grid_pos[1]:  # first line of interval grid (contains wide characters)
-                # Check whether the total /Unicode display width/ of the line equals the specified width.
-                self.assertEqual(_hacked_unicode_width(nc_line), output_dims[0])
-
-                # Check whether the /length in code points/ of the line equals the specified width minus
-                # the total extra Unicode display width (i.e. the number of wide (two-column) characters).
-                #self.assertEqual(len(nc_line), output_dims[0] - _count_wide_chars(nc_line))
-
-                # Check whether the actual interval boundaries in the output match the expected
-                # ones in expected_display_bounds.
-                self.assertEqual(actual_display_bounds, expected_display_bounds)
-
-                self.assertEqual(nc_line[-3], ":")  # the colon in the daily total
-            elif grid_pos[1] < lineno < grid_pos[1] + grid_dims[1]:  # other line (no wide characters)
-                self.assertEqual(len(nc_line), output_dims[0])
-                self.assertEqual(nc_line[-3], ":")  # the colon in the daily total
-
-            lineno += 1
 
 if __name__ == "__main__":
     from simpletap import TAPTestRunner
