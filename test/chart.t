@@ -2,7 +2,8 @@
 
 ###############################################################################
 #
-# Copyright 2017 - 2019, Thomas Lauf, Paul Beckingham, Federico Hernandez.
+# Copyright 2017 - 2019, 2026, Thomas Lauf, Paul Beckingham, Federico Hernandez,
+# Johan Sarge.
 #
 # Permission is hereby granted, free of charge, to any person obtaining a copy
 # of this software and associated documentation files (the "Software"), to deal
@@ -41,9 +42,14 @@ from basetest.exceptions import CommandError
 
 _ESCAPE_START_CHAR = "\x1b"  # ASCII Escape
 _ESCAPE_START_CHAR_2 = "["
+#_ESCAPE_START_SEQ = _ESCAPE_START_CHAR + _ESCAPE_START_CHAR_2
 _ESCAPE_ARG_CHARS = "0123456789;"
 _ESCAPE_END_CHAR = "m"  # end of ANSI "Select Graphic Rendition" escape sequence
 _ESCAPE_ARGS_EOR = "0"  # attribute reset, indicating end of attributed range
+
+#_INTERNAL_AXIS_COLOR_VAR = "theme.colors.label"
+#_INTERNAL_AXIS_COLOR_VAL = "cyan on cyan"
+#_INTERNAL_AXIS_COLOR_ESC = "36;46"
 
 def _hacked_unicode_char_width(c):
     if unicode_general_category(c) in ( 'Mn', 'Me', 'Cc', 'Cf', 'Cs', 'Co', 'Cn' ):
@@ -151,9 +157,55 @@ def _strip_ansi_escapes(s):
         esc, sep, tail = tail.partition(_ESCAPE_END_CHAR)
 
         if len(sep) == 0:  # end of escape sequence not found
-            return None  # fail
+            return None  fail
 
     return head
+
+# def _strip_ansi_escapes(s, start=None, end=None, pred=None, pred_close=None):
+    # if start is None:
+        # start = _ESCAPE_START_SEQ
+# 
+    # if end is None:
+        # end = _ESCAPE_END_CHAR
+# 
+    # if pred is None:
+        # pred = lambda esc: True
+# 
+    # if pred_close is None:
+        # pred_close = pred
+# 
+    # head = ""
+    # tail = s
+    # in_esc_range = False
+    # curr_pred = pred
+# 
+    # while True:
+        # # Partition (tail) into (pre_esc, start_of_esc, (esc, end_of_esc, post_esc)).
+        # pre_esc, sep_start, tail = tail.partition(start)
+        # head += pre_esc  # Add pre_esc to partial stripped string.
+# 
+        # if len(sep_start) == 0:  # no more escape sequences
+            # break
+# 
+        # # Partition (tail) into (esc, end_of_esc, post_esc).
+        # esc, sep_end, tail = tail.partition(end)
+# 
+        # if len(sep_end) == 0:  # end of escape sequence not found
+            # return None  # fail
+# 
+        # if curr_pred(esc):  # Strip this escape sequence?
+            # in_esc_range = not in_esc_range  # start/end of stripped escape sequence range
+            # curr_pred = pred_close if in_esc_range else pred
+        # else:
+            # head += sep_start + esc + sep_end  # Do not strip this escape sequence.
+# 
+    # return head
+# 
+# def _internal_axis_esc_pred(esc):
+    # return esc == _INTERNAL_AXIS_COLOR_ESC
+# 
+# def _internal_axis_esc_pred_close(esc):
+    # return esc == _ESCAPE_ARGS_EOR
 
 class _TrackedInterval:
     @classmethod
@@ -359,15 +411,6 @@ class TestChart(TestCase):
         hour_spacing = config.get("reports.week.spacing", 1)
         output_extra_width = 7  # width of the totals column ("  HH:MM")
 
-        # Identify the positions ((X,Y), zero-based, relative to the start (i.e. UL corner)
-        # of the output) of the hours axis and the tracked interval grid.
-        # ISSUE: How to robustly determine expected values for these coordinates?
-        if internal_axis:  # No separate axis output line.
-            grid_pos = (11, 1)
-        else:
-            axis_pos = (11, 1)
-            grid_pos = (11, 2)
-
         # Configure our instance of Timewarrior.
         for var, value in config.items():
             try:
@@ -377,6 +420,19 @@ class TestChart(TestCase):
                 # due to an attempt to set a config parameter to its current value. I'm not
                 # sure that treating a no-op as an error is a good idea at any layer, TBH.
                 pass
+
+        # Identify the positions ((X,Y), zero-based, relative to the start (i.e. UL corner)
+        # of the output) of the hours axis and the tracked interval grid.
+        # ISSUE: How to robustly determine expected values for these coordinates?
+        if internal_axis:  # No separate axis output line.
+            grid_pos = (11, 1)
+            # NOTE: We set a custom color for the hour labels to make the corresponding ANSI
+            # formatting sequences easier to strip later (so they don't interfere with
+            # interval block detection).
+            #self.t.config(_INTERNAL_AXIS_COLOR_VAR, _INTERNAL_AXIS_COLOR_VAL)
+        else:
+            axis_pos = (11, 1)
+            grid_pos = (11, 2)
 
         # Optional extra hints for the chart display commands.
         if hints is None:
@@ -444,6 +500,12 @@ class TestChart(TestCase):
         lineno = 0
         day_of_week = 0
         for nc_line, c_line in zip(nc_out_lines, c_out_lines, strict=True):
+            # NOTE: When the axis is internal, the ANSI formatting of the hour labels gets in the way
+            # of detecting the displayed interval blocks, so we selectively strip that formatting here.
+            # if internal_axis:
+                # c_line = _strip_ansi_escapes(
+                    # c_line, pred=_internal_axis_esc_pred, pred_close=_internal_axis_esc_pred_close)
+
             # For each c_line, identify the start and end of each displayed interval block
             # by searching for the corresponding ANSI escape sequences. Each interval start should
             # be associated with a "set attributes" sequence (f"\x1b[{attr_args}m"), each interval
@@ -577,15 +639,16 @@ class TestChart(TestCase):
 
     # TODO: This is broken because extra ANSI formatting codes are generated for
     # the internal hour labels, and the test driver cannot deal with that.
-    # def test_chart_wide_chars_high_internal(self):
-        # config = {
-            # "reports.week.hours": "no",
-            # "reports.week.lines": 3,
-            # "reports.week.cell": 15,
-            # "reports.week.spacing": 1,
-            # "reports.week.axis": "internal" }
-        # intervals = self._make_unicode_dataset_basic()
-        # self._do_wide_char_tags_test(config, intervals)
+    def test_chart_wide_chars_high_internal(self):
+        config = {
+            "reports.week.hours": "no",
+            "reports.week.lines": 3,
+            "reports.week.cell": 15,
+            "reports.week.spacing": 1,
+            "reports.week.axis": "internal",
+            "theme.colors.label": "none" }
+        intervals = self._make_unicode_dataset_basic()
+        self._do_wide_char_tags_test(config, intervals)
 
     # ISSUE: Unusual minutes-per-char values (like 11) appear to break the chart.
     @unittest.expectedFailure
