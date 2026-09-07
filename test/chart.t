@@ -166,14 +166,14 @@ def _strip_ansi_escapes(s):
     return head
 
 def _pad_to_width(s, width, pad_char=" "):
-	s_width = _hacked_unicode_width(s)
-	if s_width > width:
-		return None  # ERROR
-	
-	return s + (width - s_width) * pad_char
+    s_width = _hacked_unicode_width(s)
+    if s_width > width:
+        return None  # ERROR
+
+    return s + (width - s_width) * pad_char
 
 def _split_lines(s, max_width, hyphenate=False, surrogate="."):
-    if hacked_unicode_width(surrogate) > max_width:
+    if _hacked_unicode_char_width(surrogate) > max_width:
         return None  # ERROR
 
     # Replace characters that won't fit on any line with the surrogate character.
@@ -260,13 +260,21 @@ class _TrackedInterval:
     def _make_datetime_str(cls, dom, h, m):
         return f"2026-02-{dom:02d}T{h:02d}:{m:02d}:00"
 
-    def __init__(self, dom, start_h, start_m, end_h, end_m, tags):
+    @classmethod
+    def assign_iids(cls, intervals):
+        intervals_desc = sorted(intervals, reverse=True)
+
+        for index in range(len(intervals_desc)):
+            intervals_desc[index].iid = index + 1
+
+    def __init__(self, dom, start_h, start_m, end_h, end_m, tags, iid=0):
         self.dom = dom
         self.start_h = start_h
         self.start_m = start_m
         self.end_h = end_h
         self.end_m = end_m
         self.tags = tags
+        self.iid = iid
 
     def __str__(self):
         start_dt = self._make_datetime_str(self.dom, self.start_h, self.start_m)
@@ -278,15 +286,61 @@ class _TrackedInterval:
 
         return f"track {start_dt} - {end_dt} {tags}"
 
+    # NOTE: Instances are assumed to be non-overlapping in time and are compared by start time.
+    def __eq__(self, other):
+        if not isinstance(other, _TrackedInterval):
+            return NotImplemented
+        else:
+            return self.dom == other.dom and self.start_h == other.start_h and self.start_m == other.start_m
+
+    def __lt__(self, other):
+        if not isinstance(other, _TrackedInterval):
+            return NotImplemented
+        elif self.dom < other.dom:
+            return True
+        elif self.dom == other.dom:
+            if self.start_h < other.start_h:
+                return True
+            elif self.start_h == other.start_h:
+                return self.start_m < other.start_m
+            else:
+                return False
+        else:
+            return False
+
+    return __gt__(self, other):
+        if not isinstance(other, _TrackedInterval):
+            return NotImplemented
+        else:
+            return other < self
+
+    return __le__(self, other):
+        if not isinstance(other, _TrackedInterval):
+            return NotImplemented
+        else:
+            return self < other or self == other
+
+    return __ge__(self, other):
+        if not isinstance(other, _TrackedInterval):
+            return NotImplemented
+        else:
+            return other < self or self == other
+
     def get_display_bounds(self, minutes_per_col, hour_spacing):
         return _get_display_bounds(
             self.start_h, self.start_m, self.end_h, self.end_m, minutes_per_col, hour_spacing)
 
-    def get_label(self):
+    def get_label(self, with_iid=False):
         tags = self.tags
         if not isinstance(tags, str):
             tags = " ".join(tags)
-        return tags
+
+        label = tags.replace("'", "")  # NOTE: Q&D fixup of shlex single quotes in tag strings.
+
+        if with_iid:
+            label = f"@{self.iid} " + label
+
+        return label
 
 
 class TestChart(TestCase):
@@ -464,6 +518,7 @@ class TestChart(TestCase):
         minutes_per_col = config.get("reports.week.cell", 15)
         hour_spacing = config.get("reports.week.spacing", 1)
         output_extra_width = 7  # width of the totals column ("  HH:MM")
+        with_iids = (hints is not None and "ids" in hints)
 
         # Configure our instance of Timewarrior.
         for var, value in config.items():
@@ -511,6 +566,9 @@ class TestChart(TestCase):
             intervals.append([ interval ])
             start_h += start_h_delta
 
+        # Assign each tracked interval its (hopefully) correct ID, in case we need to display them.
+        _TrackedInterval.assign_iids(intervals)
+
         # Map start and end times of test intervals to start and end columns of
         # corresponding displayed interval blocks.
         expected_display_bounds = []  # bounds relative to start of grid row (00:00:00)
@@ -524,17 +582,16 @@ class TestChart(TestCase):
             for interval in intervals_for_the_day:
                 # NOTE: Enforce the expected days of the month in test input.
                 interval.dom = curr_day_of_month
+                display_bounds = interval.get_display_bounds(minutes_per_col, hour_spacing)
+                label = interval.get_label(with_iids)
 
-                expected_display_bounds_for_the_day.append(
-                    interval.get_display_bounds(minutes_per_col, hour_spacing))
-
-                label = interval.get_label()
-                label_lines = _split_lines(label, end_col - start_col)
+                label_lines = _split_lines(label, display_bounds[1] - display_bounds[0])
                 self.assertIsNotNone(label_lines)
 
                 if len(label_lines) > lines_per_day:
                     del label_lines[lines_per_day:]
 
+                expected_display_bounds_for_the_day.append(display_bounds)
                 expected_label_lines_for_the_day.append(label_lines)
 
             expected_display_bounds.append(expected_display_bounds_for_the_day)
@@ -677,6 +734,21 @@ class TestChart(TestCase):
                 _TrackedInterval(20,  3, 30,  5, 25, "'herpa derpa ding dong'"),
                 _TrackedInterval(20,  7, 59, 12, 12, "'هَمْزَة عَلَى الأَلِفْ'") ] ]  # Arabic
 
+    def _make_unicode_dataset_linewrap(self):
+        return [
+            [
+                _TrackedInterval(16,  8, 55,  9,  0, "안녕하세요 월드"),
+                _TrackedInterval(16, 10,  0, 13,  0, "안녕하세요 월드"),
+                _TrackedInterval(16, 14,  0, 15, 45, "안녕하세요 월드"),
+                _TrackedInterval(16, 17,  0, 17, 55, "안녕하세요 월드")] ]
+
+    def _make_unicode_dataset_linewrap_issues(self):
+        return [
+            [
+                _TrackedInterval(16,  3,  0,  3, 10, "a     bc"),
+                _TrackedInterval(16,  3, 30,  3, 40, "a     bc"),
+                _TrackedInterval(16, 16, 30, 16, 35, "a     bc")] ]
+
     def test_chart_wide_chars_basic(self):
         """Chart should be correctly displayed with wide characters"""
         config = {
@@ -709,12 +781,13 @@ class TestChart(TestCase):
         hints = ( "ids", )
         self._do_wide_char_tags_test(config, intervals, hints)
 
-    def test_chart_wide_chars_high(self):
-        """Chart should be correctly displayed with wide characters and three lines per day"""
+    def test_chart_wide_chars_high_narrow(self):
+        """Chart should be correctly displayed with wide characters, three lines per day
+           and 30 minutes per column"""
         config = {
             "reports.week.hours": "no",
             "reports.week.lines": 3,
-            "reports.week.cell": 15,
+            "reports.week.cell": 30,  # Narrow enough to test line wrapping behavior.
             "reports.week.spacing": 1 }
         intervals = self._make_unicode_dataset_basic()
         self._do_wide_char_tags_test(config, intervals)
@@ -731,6 +804,16 @@ class TestChart(TestCase):
             "reports.week.axis": "internal",
             "theme.colors.label": "none" }
         intervals = self._make_unicode_dataset_basic()
+        self._do_wide_char_tags_test(config, intervals)
+
+    def test_chart_wide_chars_linewrap_basic(self):
+        """Chart should be correctly displayed with line wrapped wide characters"""
+        config = {
+            "reports.week.hours": "no",
+            "reports.week.lines": 3,
+            "reports.week.cell": 15,
+            "reports.week.spacing": 1 }
+        intervals = self._make_unicode_dataset_linewrap()
         self._do_wide_char_tags_test(config, intervals)
 
     # ISSUE: Unusual minutes-per-char values (like 11) appear to break the chart.
@@ -756,6 +839,19 @@ class TestChart(TestCase):
             "reports.week.cell": 15,
             "reports.week.spacing": 1 }
         intervals = self._make_unicode_dataset_hard()
+        self._do_wide_char_tags_test(config, intervals)
+
+    # ISSUE: Runs of more than one space inside tags break the chart when line wrapped.
+    # ISSUE: Very short intervals (<(cell//2) minutes) are not displayed at all. Is this intended behavior?
+    @unittest.expectedFailure
+    def test_chart_wide_chars_linewrap_issues(self):
+        """Chart should be correctly displayed with very short intervals and line wrapped runs of spaces"""
+        config = {
+            "reports.week.hours": "no",
+            "reports.week.lines": 3,
+            "reports.week.cell": 15,
+            "reports.week.spacing": 1 }
+        intervals = self._make_unicode_dataset_linewrap_issues()
         self._do_wide_char_tags_test(config, intervals)
 
 if __name__ == "__main__":
