@@ -502,23 +502,6 @@ void Chart::renderInterval (
     {
       std::vector <std::string> text_lines;
 
-      // --
-      // The hang/memory consumption in #309 is due to a bug in libshared's wrapText
-      // It would be best to make wrapText/extractText width be the count of characters on the screen (and not a byte width).
-      // This fix will only show the tag if the utf8 character width is within the width (and it won't try to wrap),
-      // but otherwise functions normally for text where the utf-8 width matches the byte length of the label.
-      //
-      /*size_t utf8_characters = utf8_text_width (label);
-      if (static_cast <size_t> (width) >= utf8_characters)
-      {
-        text_lines.push_back (label);
-      }
-      else if (utf8_characters == label.size ())
-      {
-        wrapText (text_lines, label, width, false);
-      }*/
-      // --
-
       wrapText (text_lines, label, width, false);
 
       for (unsigned int i = 0; i < lines.size (); ++i)

@@ -26,6 +26,7 @@
 #
 ###############################################################################
 
+import itertools
 import os
 import sys
 import unittest
@@ -172,86 +173,85 @@ def _pad_to_width(s, width, pad_char=" "):
 
     return s + (width - s_width) * pad_char
 
+def _extract_line(s, max_width, hyphenate, ch_index):
+    if ch_index >= len(s):
+        return None, len(s)
+
+    line_start_ch_i = 0
+    prev_word_end_ch_i = None
+    prev_pos_w_ch_i = None
+    line_width = 0
+    ch_i = 0
+
+    while ch_i < len(s):  # We can't use range(), because we may need to rewind ch_i.
+        ch = s[ch_i]
+
+        if ch in ("\0", "\n"):  # mandatory line break
+            line = s[line_start_ch_i:ch_i]
+            line = line.rstrip()  # Strip any whitespace at end of line.
+            return line, ch_i+1  # Do not include the line break character in any line.
+        elif ch.isspace():  # whitespace
+            if ch_i == line_start_ch_i:  # Ignore whitespace at start of line.
+                line_start_ch_i += 1
+                ch_i += 1
+                continue
+            elif not s[ch_i-1].isspace():  # Detect word endings.
+                prev_word_end_ch_i = ch_i
+
+        ch_width = _hacked_unicode_char_width(ch)
+
+        if line_width + ch_width <= max_width:  # Line not full.
+            if ch_width > 0:
+                prev_pos_w_ch_i = ch_i  # positive-width character added to line
+
+            line_width += ch_width  # Include current character in current line.
+            ch_i += 1
+            continue
+
+        line, next_ch_i = None
+
+        if prev_word_end_ch_i is not None:  # Line full, break at previous word ending.
+            line = s[line_start_ch_i:prev_word_end_ch_i]
+            next_ch_i = prev_word_end_ch_i  # Start next line at previous word ending.
+        elif hyphenate:  # Line full, no word ending available, hyphenation enabled.
+            hyphen_i = ch_i if line_width < max_width else prev_pos_w_ch_i
+            hyphen_i_c_width = _hacked_unicode_char_width(s[hyphen_i])
+
+            if hyphen_i == ch_i or line_width - hyphen_i_c_width > 0:
+                # Hyphenated line has positive width, go ahead and hyphenate.
+                line = s[line_start_ch_i:hyphen_i] + '-'
+                next_ch_i = hyphen_i  # Start next line at character that was dropped to fit the hyphen.
+            else:  # Can't hyphenate here.
+                line = s[line_start_ch_i:ch_i]
+                next_ch_i = ch_i  # Start next line at current character.
+        else:  # Line full, no word ending available, hyphenation disabled.
+            line = s[line_start_ch_i:ch_i]
+            next_ch_i = ch_i  # Start next line at current character.
+
+        return line, next_ch_i
+
+    if line_start_ch_i < len(s):  # Include the last line, which contains non-whitespace.
+        line = s[line_start_ch_i:]
+        line = line.rstrip()  # Strip any whitespace at end of line.
+        return line, len(s)
+
+    return None, len(s)  # Last line contained nothing but whitespace.
+
 def _split_lines(s, max_width, hyphenate=False, surrogate="."):
     if _hacked_unicode_char_width(surrogate) > max_width:
         return None  # ERROR
 
     # Replace characters that won't fit on any line with the surrogate character.
     s_old = s
-    s = "".join((c if _hacked_unicode_char_width(c) <= max_width else surrogate) for c in s)
+    s = "".join((surrogate if _hacked_unicode_char_width(ch) > max_width else ch) for ch in s)
 
     lines = []
-    line_start_i = 0
-    line_width = 0
-    prev_word_end_i = None
-    c_i = 0
+    ch_index = 0
 
-    while c_i < len(s):  # We can't use range(), because we may need to rewind c_i.
-        c = s[c_i]
-
-        if c in ("\0", "\n"):  # mandatory line break
-            line = s[line_start_i:c_i]
-            line = line.rstrip()  # Strip any whitespace at end of line.
-            lines.append(line)
-            line_start_i = c_i+1  # Do not include the line break character in any line.
-            line_width = 0
-            prev_word_end_i = None
-            c_i = line_start_i
-            continue
-        elif c.isspace():  # whitespace
-            if c_i == line_start_i:  # Ignore whitespace at start of line.
-                line_start_i += 1
-                c_i += 1
-                continue
-            elif not s[c_i-1].isspace():  # Detect word endings.
-                prev_word_end_i = c_i
-
-        c_width = _hacked_unicode_char_width(c)
-
-        if line_width + c_width <= max_width:  # Line not full.
-            line_width += c_width  # Include current character in current line.
-            c_i += 1
-            continue
-
-        line = None
-
-        if prev_word_end_i is not None:  # Line full, break at previous word ending.
-            line = s[line_start_i:prev_word_end_i]
-            line_start_i = prev_word_end_i  # Start next line at previous word ending.
-        elif hyphenate:  # Line full, no word ending available, hyphenation enabled.
-            hyphen_i = c_i-1
-            hyphen_i_c_width = None
-
-            # Rewind hyphen_i until a character with positive width is found.
-            while hyphen_i > line_start_i:
-                hyphen_i_c_width = _hacked_unicode_char_width(s[hyphen_i])
-                if hyphen_i_c_width > 0:
-                    break
-                hyphen_i -= 1
-
-            if hyphen_i > line_start_i and line_width - hyphen_i_c_width > 0:
-                # Hyphenated line has positive width, go ahead and hyphenate.
-                line = s[line_start_i:hyphen_i] + '-'
-                line_start_i = hyphen_i  # Start next line at character that was dropped to fit the hyphen.
-            else:  # Can't hyphenate here.
-                line = s[line_start_i:c_i]
-                line_start_i = c_i  # Start next line at current character.
-        else:  # Line full, no word ending available, hyphenation disabled.
-            line = s[line_start_i:c_i]
-            line_start_i = c_i  # Start next line at current character.
-
+    while ch_index < len(s):
+        line, ch_index = _extract_line(s, max_width, hyphenate, ch_index)
         if line is not None:
-            line = line.rstrip()  # Strip any whitespace at end of line.
             lines.append(line)
-
-        line_width = 0
-        prev_word_end_i = None
-        c_i = line_start_i  # Continue processing at start of next line.
-
-    if line_start_i < len(s):  # Include the last line, which is potentially not full.
-        line = s[line_start_i:]
-        line = line.rstrip()  # Strip any whitespace at end of line.
-        lines.append(line)
 
     return lines
 
@@ -308,19 +308,19 @@ class _TrackedInterval:
         else:
             return False
 
-    return __gt__(self, other):
+    def __gt__(self, other):
         if not isinstance(other, _TrackedInterval):
             return NotImplemented
         else:
             return other < self
 
-    return __le__(self, other):
+    def __le__(self, other):
         if not isinstance(other, _TrackedInterval):
             return NotImplemented
         else:
             return self < other or self == other
 
-    return __ge__(self, other):
+    def __ge__(self, other):
         if not isinstance(other, _TrackedInterval):
             return NotImplemented
         else:
@@ -566,26 +566,34 @@ class TestChart(TestCase):
             intervals.append([ interval ])
             start_h += start_h_delta
 
+        # Enforce the expected days of the month in test input.
+        curr_day_of_month = start_day_of_month
+        for intervals_for_the_day in intervals:
+            for interval in intervals_for_the_day:
+                interval.dom = curr_day_of_month
+            curr_day_of_month += 1
+
         # Assign each tracked interval its (hopefully) correct ID, in case we need to display them.
-        _TrackedInterval.assign_iids(intervals)
+        _TrackedInterval.assign_iids(itertools.chain(*intervals))
 
         # Map start and end times of test intervals to start and end columns of
         # corresponding displayed interval blocks.
         expected_display_bounds = []  # bounds relative to start of grid row (00:00:00)
         expected_label_lines = []
-        curr_day_of_month = start_day_of_month
         for intervals_for_the_day in intervals:
             # [ (start_col, end_col), ... ] # width_in_cols = end_col - start_col
             expected_display_bounds_for_the_day = []
             expected_label_lines_for_the_day = []
 
             for interval in intervals_for_the_day:
-                # NOTE: Enforce the expected days of the month in test input.
-                interval.dom = curr_day_of_month
                 display_bounds = interval.get_display_bounds(minutes_per_col, hour_spacing)
                 label = interval.get_label(with_iids)
+                block_width = display_bounds[1] - display_bounds[0]
 
-                label_lines = _split_lines(label, display_bounds[1] - display_bounds[0])
+                if block_width <= 0:
+                    continue  # Zero-width blocks do not show up in output.
+
+                label_lines = _split_lines(label, block_width)
                 self.assertIsNotNone(label_lines)
 
                 if len(label_lines) > lines_per_day:
@@ -596,7 +604,6 @@ class TestChart(TestCase):
 
             expected_display_bounds.append(expected_display_bounds_for_the_day)
             expected_label_lines.append(expected_label_lines_for_the_day)
-            curr_day_of_month += 1
 
         # Execute a "track" command for each interval in the (modified) test input dataset.
         for intervals_for_the_day in intervals:
@@ -745,9 +752,9 @@ class TestChart(TestCase):
     def _make_unicode_dataset_linewrap_issues(self):
         return [
             [
-                _TrackedInterval(16,  3,  0,  3, 10, "a     bc"),
-                _TrackedInterval(16,  3, 30,  3, 40, "a     bc"),
-                _TrackedInterval(16, 16, 30, 16, 35, "a     bc")] ]
+                _TrackedInterval(16,  3,  0,  3, 10, "'a     bc'"),
+                _TrackedInterval(16,  3, 30,  3, 40, "'a     bc'"),
+                _TrackedInterval(16, 16, 30, 16, 35, "'a     bc'")] ]
 
     def test_chart_wide_chars_basic(self):
         """Chart should be correctly displayed with wide characters"""
