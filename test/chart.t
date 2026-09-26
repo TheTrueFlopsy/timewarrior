@@ -177,11 +177,11 @@ def _extract_line(s, max_width, hyphenate, ch_index):
     if ch_index >= len(s):
         return None, len(s)
 
-    line_start_ch_i = 0
+    line_start_ch_i = ch_index
     prev_word_end_ch_i = None
     prev_pos_w_ch_i = None
+    ch_i = line_start_ch_i
     line_width = 0
-    ch_i = 0
 
     while ch_i < len(s):  # We can't use range(), because we may need to rewind ch_i.
         ch = s[ch_i]
@@ -191,11 +191,7 @@ def _extract_line(s, max_width, hyphenate, ch_index):
             line = line.rstrip()  # Strip any whitespace at end of line.
             return line, ch_i+1  # Do not include the line break character in any line.
         elif ch.isspace():  # whitespace
-            if ch_i == line_start_ch_i:  # Ignore whitespace at start of line.
-                line_start_ch_i += 1
-                ch_i += 1
-                continue
-            elif not s[ch_i-1].isspace():  # Detect word endings.
+            if ch_i > line_start_ch_i and not s[ch_i-1].isspace():  # Detect word endings.
                 prev_word_end_ch_i = ch_i
 
         ch_width = _hacked_unicode_char_width(ch)
@@ -208,11 +204,14 @@ def _extract_line(s, max_width, hyphenate, ch_index):
             ch_i += 1
             continue
 
-        line, next_ch_i = None
+        line, next_ch_i = None, None
 
         if prev_word_end_ch_i is not None:  # Line full, break at previous word ending.
             line = s[line_start_ch_i:prev_word_end_ch_i]
-            next_ch_i = prev_word_end_ch_i  # Start next line at previous word ending.
+            next_ch_i = prev_word_end_ch_i + 1  # Start next line after previous word ending.
+        elif s[line_start_ch_i:ch_i].isspace():  # Line full but all whitespace, strip that out.
+            line = ""  # Output empty line.
+            next_ch_i = ch_i  # Start next line at current character.
         elif hyphenate:  # Line full, no word ending available, hyphenation enabled.
             hyphen_i = ch_i if line_width < max_width else prev_pos_w_ch_i
             hyphen_i_c_width = _hacked_unicode_char_width(s[hyphen_i])
@@ -230,12 +229,12 @@ def _extract_line(s, max_width, hyphenate, ch_index):
 
         return line, next_ch_i
 
-    if line_start_ch_i < len(s):  # Include the last line, which contains non-whitespace.
+    if line_start_ch_i < len(s):  # Include the last line.
         line = s[line_start_ch_i:]
         line = line.rstrip()  # Strip any whitespace at end of line.
         return line, len(s)
 
-    return None, len(s)  # Last line contained nothing but whitespace.
+    return None, len(s)  # Last line empty.
 
 def _split_lines(s, max_width, hyphenate=False, surrogate="."):
     if _hacked_unicode_char_width(surrogate) > max_width:
@@ -823,6 +822,16 @@ class TestChart(TestCase):
         intervals = self._make_unicode_dataset_linewrap()
         self._do_wide_char_tags_test(config, intervals)
 
+    def test_chart_linewrap_issues(self):
+        """Chart should be correctly displayed with very short intervals and line wrapped runs of spaces"""
+        config = {
+            "reports.week.hours": "no",
+            "reports.week.lines": 3,
+            "reports.week.cell": 15,
+            "reports.week.spacing": 1 }
+        intervals = self._make_unicode_dataset_linewrap_issues()
+        self._do_wide_char_tags_test(config, intervals)
+
     # ISSUE: Unusual minutes-per-char values (like 11) appear to break the chart.
     @unittest.expectedFailure
     def test_chart_wide_chars_odd_scale(self):
@@ -846,19 +855,6 @@ class TestChart(TestCase):
             "reports.week.cell": 15,
             "reports.week.spacing": 1 }
         intervals = self._make_unicode_dataset_hard()
-        self._do_wide_char_tags_test(config, intervals)
-
-    # ISSUE: Runs of more than one space inside tags break the chart when line wrapped.
-    # ISSUE: Very short intervals (<(cell//2) minutes) are not displayed at all. Is this intended behavior?
-    @unittest.expectedFailure
-    def test_chart_wide_chars_linewrap_issues(self):
-        """Chart should be correctly displayed with very short intervals and line wrapped runs of spaces"""
-        config = {
-            "reports.week.hours": "no",
-            "reports.week.lines": 3,
-            "reports.week.cell": 15,
-            "reports.week.spacing": 1 }
-        intervals = self._make_unicode_dataset_linewrap_issues()
         self._do_wide_char_tags_test(config, intervals)
 
 if __name__ == "__main__":
