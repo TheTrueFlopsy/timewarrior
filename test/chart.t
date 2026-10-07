@@ -216,8 +216,8 @@ def _extract_line(s, max_width, hyphenate, ch_index):
             hyphen_i = ch_i if line_width < max_width else prev_pos_w_ch_i
             hyphen_i_c_width = _hacked_unicode_char_width(s[hyphen_i])
 
-            if hyphen_i == ch_i or line_width - hyphen_i_c_width > 0:
-                # Hyphenated line has positive width, go ahead and hyphenate.
+            if hyphen_i == ch_i or (line_width - hyphen_i_c_width > 0 and not s[line_start_ch_i:hyphen_i].isspace()):
+                # Hyphenated line has positive width (and isn't all whitespace), go ahead and hyphenate.
                 line = s[line_start_ch_i:hyphen_i] + '-'
                 next_ch_i = hyphen_i  # Start next line at character that was dropped to fit the hyphen.
             else:  # Can't hyphenate here.
@@ -775,7 +775,6 @@ class TestChart(TestCase):
         intervals = self._make_unicode_dataset_basic()
         self._do_wide_char_tags_test(config, intervals)
 
-    # FIXME: The displayed interval IDs will mess things up for the new content-checking code.
     def test_chart_wide_chars_broad_ids(self):
         """Chart should be correctly displayed with wide characters, IDs, and 10 minutes per column"""
         config = {
