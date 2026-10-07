@@ -821,6 +821,9 @@ class TestChart(TestCase):
         intervals = self._make_unicode_dataset_linewrap()
         self._do_wide_char_tags_test(config, intervals)
 
+    # NOTE: The line wrapper changes in libshared PR 125 fix this issue,
+    # so if that PR is merged, expectedFailure should be removed here.
+    @unittest.expectedFailure
     def test_chart_linewrap_issues(self):
         """Chart should be correctly displayed with very short intervals and line wrapped runs of spaces"""
         config = {
